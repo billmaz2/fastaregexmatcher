@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FASTA Regex Matcher</title>
+<style>
+  :root { --bg:#f6f7f9; --fg:#1d232b; --card:#fff; --line:#d5dae1; --accent:#2563eb; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; font:15px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  h1 { font-size:1.2rem; margin:0 0 12px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:12px; }
+  label.t { display:block; font-weight:600; margin-bottom:6px; }
+  textarea { width:100%; font:13px/1.4 ui-monospace, Menlo, Consolas, monospace; border:1px solid var(--line); border-radius:6px; padding:8px; resize:vertical; }
+  #fasta { height:180px; white-space:pre; overflow:auto; }
+  #pattern { height:64px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:8px; font-size:13px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:6px 14px; cursor:pointer; font-size:13px; }
+  button:disabled { opacity:.35; cursor:not-allowed; }
+  input[type=number] { width:100px; padding:4px 6px; border:1px solid var(--line); border-radius:6px; font-size:13px; }
+  #status { color:#555; }
+  #status.err { color:#b91c1c; }
+  progress { width:240px; height:14px; accent-color:var(--accent); }
+  .hint { font-size:12px; color:#666; margin-top:6px; }
+  #mwrap { max-height:65vh; overflow:auto; border:1px solid var(--line); border-radius:6px; margin-top:8px; }
+  #mtable { width:100%; border-collapse:collapse; font:13px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  #mtable th { position:sticky; top:0; background:#eef1f5; text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  #mtable td { padding:4px 8px; border-bottom:1px solid #eceff3; vertical-align:top; }
+  #mtable td.seq, #mtable td.ref { word-break:break-all; }
+  #mtable td.ref { color:#0f766e; }
+  #mtable tbody tr[data-i] { cursor:pointer; }
+  #mtable tbody tr[data-i]:hover { background:#fff7d6; }
+  #mtable tr.gap td { text-align:center; color:#666; background:#f3f5f8; font-style:italic; }
+  #modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.45); align-items:center; justify-content:center; z-index:10; padding:16px; }
+  #modal .box { background:#fff; border-radius:8px; width:min(720px,100%); max-height:80vh; display:flex; flex-direction:column; padding:12px; box-shadow:0 10px 40px rgba(0,0,0,.3); }
+  #modal .bar { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+  #mtext { margin:0; overflow:auto; font:13px/1.4 ui-monospace, Menlo, Consolas, monospace; white-space:pre-wrap; word-break:break-all; border:1px solid var(--line); border-radius:6px; padding:8px; background:#fcfcfd; }
+</style>
+</head>
+<body>
+<h1>FASTA regex matcher</h1>
+
+<section>
+  <label class="t" for="fasta">FASTA sequence (default: <i>E. coli</i> K-12 MG1655 full genome, NC_000913.3)</label>
+  <textarea id="fasta" spellcheck="false" placeholder="Loading E. coli genome from NCBI…"></textarea>
+  <div class="row">
+    <input type="file" id="file" accept=".fa,.fasta,.fna,.txt">
+    <button id="reload" type="button">Reload E. coli genome</button>
+    <span id="loadstatus"></span>
+  </div>
+</section>
+
+<section>
+  <label class="t" for="pattern">Pattern (Python <code>re</code> style)</label>
+  <textarea id="pattern" spellcheck="false">ATG(?:(?!TAA|TAG|TGA)[ACGT]{3}){59,}(?:TAA|TAG|TGA)</textarea>
+  <div class="hint">Default pattern finds open reading frames (protein-coding candidates): ATG start, at least 59 further in-frame codons with no stop, then a TAA/TAG/TGA stop (≥ 60 amino acids). Lower the <code>{59,}</code> number to find shorter genes. Other examples: <code>GA[AT]TC</code>, <code>TATAAT</code>.</div>
+  <div class="row">
+    <label><input type="checkbox" id="both" checked> search both strands (also the reverse complement)</label>
+    <label><input type="checkbox" id="icase" checked> ignore case</label>
+  </div>
+  <div class="row">
+    <button id="go" type="button">Search</button>
+    <progress id="prog" max="100" value="0"></progress>
+    <span id="pct">0%</span>
+    <span id="status"></span>
+  </div>
+</section>
+
+<section>
+  <label class="t">Matches (enter an index below to show it; click a row to open it as FASTA)</label>
+  <div class="row" style="margin-top:0">
+    Match index
+    <input type="number" id="showIdx" min="1" placeholder="e.g. 3456">
+    <span id="idxnote"></span>
+  </div>
+  <div id="mwrap"><table id="mtable"><thead><tr><th>#</th><th>Start</th><th>End</th><th>Strand</th><th>Length</th><th>Sequence (first 20 … last 20 nt)</th><th>FASTA reference</th></tr></thead><tbody></tbody></table></div>
+</section>
+
+<div id="modal">
+  <div class="box">
+    <div class="bar"><b>Matching sequence (FASTA)</b>
+      <span>
+        <button id="mprev" type="button">◀ Prev</button>
+        <input type="number" id="mindex" min="1" placeholder="#"> of <span id="mtotal"></span>
+        <button id="mnext" type="button">Next ▶</button>
+        <button id="mcopy" type="button">Copy</button>
+        <button id="mblast" type="button">BLAST</button>
+        <button id="mclose" type="button">Close</button>
+      </span></div>
+    <pre id="mtext"></pre>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const MAX_COUNT = 1000000;     // matches stored/counted at most
+const SEQ_PREVIEW = 300;       // chars of sequence shown per table row
+const ECOLI_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=NC_000913.3&rettype=fasta&retmode=text";
+// Matches are stored in forward-strand coordinates (0-based start, end exclusive)
+let mRec = [], mStart = [], mEnd = [], mStrand = [];
+let records = [];   // {header, seq}
+let rcs = [];       // reverse complement of each record (only when both strands are searched)
+let runId = 0;
+let currentMatch = -1;   // index of the match currently shown in the modal
+let fullFasta = '';      // full FASTA text used for searching (textarea shows only a preview)
+
+function parseFasta(text) {
+  const recs = []; let cur = null;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line[0] === '>') { cur = { header: line.slice(1), parts: [] }; recs.push(cur); }
+    else { if (!cur) { cur = { header: 'sequence', parts: [] }; recs.push(cur); } cur.parts.push(line.replace(/\s+/g, '')); }
+  }
+  return recs.map(r => ({ header: r.header, seq: r.parts.join('') }));
+}
+
+// Translate Python-only syntax to JS equivalents
+function pyToJs(p) {
+  return p.replace(/\(\?P<(\w+)>/g, '(?<$1>').replace(/\(\?P=(\w+)\)/g, '\\k<$1>')
+          .replace(/\\A/g, '^').replace(/\\Z/g, '$');
+}
+
+const COMP = { A:'T', C:'G', G:'C', T:'A', U:'A', R:'Y', Y:'R', K:'M', M:'K', B:'V', V:'B', D:'H', H:'D', S:'S', W:'W', N:'N',
+               a:'t', c:'g', g:'c', t:'a', u:'a', r:'y', y:'r', k:'m', m:'k', b:'v', v:'b', d:'h', h:'d', s:'s', w:'w', n:'n' };
+function revComp(s) {
+  const L = s.length, out = new Array(L);
+  for (let i = 0; i < L; i++) { const c = s[L - 1 - i]; out[i] = COMP[c] || c; }
+  return out.join('');
+}
+
+const esc = s => s.replace(/[&<>]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;' }[c]));
+const refOf = (rec, s, e, strand) => '>' + rec.header.split(/\s+/)[0] + ':' + (s + 1) + '-' + e + '(' + (strand < 0 ? '-' : '+') + ')';
+const tick = () => new Promise(r => setTimeout(r, 0));
+function setProgress(p) { $('prog').value = p; $('pct').textContent = Math.round(p) + '%'; }
+// Matched sequence, read on the strand it was found on
+function seqOf(i) {
+  const r = mRec[i], s = mStart[i], e = mEnd[i];
+  if (mStrand[i] > 0) return records[r].seq.slice(s, e);
+  const L = records[r].seq.length;
+  return rcs[r].slice(L - e, L - s);
+}
+
+// Index input: table stays empty until the user enters a valid match index
+function rowHtml(i) {
+  const rec = records[mRec[i]], s = mStart[i], e = mEnd[i], len = e - s;
+  const seq = seqOf(i);
+  // Show the first 20 and last 20 nucleotides
+  const EDGE = 20;
+  let shown;
+  if (len <= 2 * EDGE) shown = esc(seq);
+  else shown = esc(seq.slice(0, EDGE)) + '…[' + (len - 2 * EDGE) + ' nt omitted]…' + esc(seq.slice(len - EDGE));
+  return '<tr data-i="' + i + '"><td>' + (i + 1) + '</td><td>' + (s + 1) + '</td><td>' + e + '</td><td>' + (mStrand[i] > 0 ? '+' : '−') +
+         '</td><td>' + len + '</td><td class="seq">' + shown + '</td><td class="ref">' + esc(refOf(rec, s, e, mStrand[i])) + '</td></tr>';
+}
+
+function renderTable() {
+  const n = mStart.length;
+  $('idxnote').textContent = n ? (n + ' matches found — enter an index (1–' + n + ')') : 'No matches yet.';
+  const out = [];
+  const v = parseInt($('showIdx').value, 10);
+  if (isNaN(v)) {
+    if (n) out.push('<tr class="gap"><td colspan="7">Table empty — enter a match index (1–' + n + ') to show that match.</td></tr>');
+  } else if (v < 1 || v > n) {
+    out.push('<tr class="gap"><td colspan="7">No match with index ' + v + ' (valid range: 1–' + n + ').</td></tr>');
+  } else {
+    out.push(rowHtml(v - 1));
+  }
+  $('mtable').tBodies[0].innerHTML = out.join('');
+}
+
+// Preview in the textarea: FASTA headers + first 500 nucleotides only.
+// The full sequence stays in fullFasta and is what actually gets searched.
+function setPreview(text, n) {
+  const lim = n || 500;
+  const lines = [];
+  let shown = 0, seqDone = false;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line[0] === '>') { lines.push(line); continue; }
+    if (seqDone) continue;
+    const clean = line.replace(/\s+/g, '');
+    if (shown + clean.length <= lim) { lines.push(clean); shown += clean.length; }
+    else {
+      lines.push(clean.slice(0, lim - shown));
+      shown = lim;
+      const total = text.replace(/>[^\n]*\n?/g, '').replace(/\s+/g, '').length;
+      lines.push('… [preview: first ' + lim + ' nt shown of ' + total + ' — the full sequence is kept and searched]');
+      seqDone = true;
+    }
+  }
+  $('fasta').value = lines.join('\n');
+}
+
+async function search() {
+  const id = ++runId;
+  const status = $('status'); status.className = '';
+  const pat = $('pattern').value.replace(/\r?\n$/, '');
+  const text = fullFasta || $('fasta').value;
+  records = parseFasta(text);
+  mRec = []; mStart = []; mEnd = []; mStrand = []; rcs = [];
+  renderTable();
+  setProgress(0);
+  if (!pat) { status.textContent = 'Enter a pattern.'; return; }
+  let re;
+  try { re = new RegExp(pyToJs(pat), 'g' + ($('icase').checked ? 'i' : '')); }
+  catch (e) { status.className = 'err'; status.textContent = 'Invalid pattern: ' + e.message; return; }
+
+  const both = $('both').checked;
+  const totalWork = (records.reduce((a, r) => a + r.seq.length, 0) || 1) * (both ? 2 : 1);
+  const t0 = performance.now();
+  let done = 0, count = 0, lastYield = t0;
+  status.textContent = 'Searching…';
+
+  // Scan one strand; returns false if a newer search replaced this one
+  const scan = async (seq, ri, strand) => {
+    const L = seq.length; re.lastIndex = 0; let m;
+    while (count < MAX_COUNT && (m = re.exec(seq)) !== null) {
+      if (m[0].length === 0) { re.lastIndex++; continue; }
+      const s = m.index, e = s + m[0].length;
+      mRec.push(ri); mStrand.push(strand);
+      if (strand > 0) { mStart.push(s); mEnd.push(e); } else { mStart.push(L - e); mEnd.push(L - s); }
+      count++;
+      if (performance.now() - lastYield > 40) {
+        setProgress(100 * (done + re.lastIndex) / totalWork);
+        status.textContent = 'Searching… ' + count + ' matches so far';
+        await tick();
+        if (id !== runId) return false;
+        lastYield = performance.now();
+      }
+    }
+    done += L;
+    setProgress(100 * done / totalWork);
+    await tick();
+    return id === runId;
+  };
+
+  for (let ri = 0; ri < records.length; ri++) {
+    if (!(await scan(records[ri].seq, ri, 1))) return;
+    if (both && count < MAX_COUNT) {
+      rcs[ri] = revComp(records[ri].seq);
+      if (!(await scan(rcs[ri], ri, -1))) return;
+    }
+    if (count >= MAX_COUNT) break;
+  }
+
+  // Sort all matches by position along the genome
+  const n = mStart.length, ord = Array.from({ length: n }, (_, i) => i);
+  ord.sort((a, b) => mRec[a] - mRec[b] || mStart[a] - mStart[b]);
+  mRec = ord.map(i => mRec[i]); mStart = ord.map(i => mStart[i]); mEnd = ord.map(i => mEnd[i]); mStrand = ord.map(i => mStrand[i]);
+
+  setProgress(100);
+  renderTable();
+  const fwd = mStrand.reduce((a, s) => a + (s > 0 ? 1 : 0), 0);
+  const ms = Math.round(performance.now() - t0);
+  status.textContent = n + ' match' + (n === 1 ? '' : 'es') + (both ? ' (' + fwd + ' forward, ' + (n - fwd) + ' reverse)' : '') +
+                       ' in ' + ms + ' ms' + (n >= MAX_COUNT ? ' – stopped at ' + MAX_COUNT : '');
+}
+
+function wrap(s, n) { const o = []; for (let i = 0; i < s.length; i += n) o.push(s.slice(i, i + n)); return o.join('\n'); }
+
+// Show match i in the modal
+function showMatch(i) {
+  if (i < 0 || i >= mStart.length) return;
+  currentMatch = i;
+  const seq = seqOf(i);
+  $('mtext').textContent = refOf(records[mRec[i]], mStart[i], mEnd[i], mStrand[i]) + ' match length=' + seq.length + '\n' + wrap(seq, 70) + '\n';
+  $('mindex').value = i + 1;
+  $('mindex').max = mStart.length;
+  $('mtotal').textContent = mStart.length;
+  $('mprev').disabled = i === 0;
+  $('mnext').disabled = i === mStart.length - 1;
+  // Keep the index input and the table in sync with the shown match
+  $('showIdx').value = i + 1;
+  if (document.activeElement !== $('showIdx')) renderTable();
+  $('modal').style.display = 'flex';
+}
+
+$('mtable').addEventListener('click', e => {
+  const tr = e.target.closest('tbody tr[data-i]'); if (!tr) return;
+  showMatch(+tr.dataset.i);
+});
+$('mprev').onclick = () => showMatch(currentMatch - 1);
+$('mnext').onclick = () => showMatch(currentMatch + 1);
+$('mindex').addEventListener('change', () => {
+  const v = parseInt($('mindex').value, 10);
+  if (!isNaN(v)) showMatch(Math.min(mStart.length, Math.max(1, v)) - 1);
+});
+$('mindex').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('mindex').dispatchEvent(new Event('change')); } });
+$('mclose').onclick = () => { $('modal').style.display = 'none'; };
+$('modal').addEventListener('click', e => { if (e.target === $('modal')) $('modal').style.display = 'none'; });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') $('modal').style.display = 'none'; });
+// Reliable copy that works in iframes / file:// / restricted sandboxes
+function copyText(t) {
+  return new Promise(resolve => {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).then(() => resolve(true), () => resolve(legacyCopy(t)));
+    } else resolve(legacyCopy(t));
+  });
+}
+function legacyCopy(t) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) { return false; }
+}
+
+// BLAST button: copy the sequence to the clipboard and open NCBI BLAST
+// (blastn) with the sequence pre-filled in the search box.
+async function blastCurrent() {
+  if (currentMatch < 0) return;
+  const seq = seqOf(currentMatch);
+  const hdr = refOf(records[mRec[currentMatch]], mStart[currentMatch], mEnd[currentMatch], mStrand[currentMatch]);
+  const fasta = '>' + hdr + '\n' + wrap(seq, 70) + '\n';
+  const copied = await copyText(fasta);
+  // NCBI Common URL API: CMD=Put submits the search directly and opens the
+  // results/waiting page (the old QUERY pre-fill no longer works reliably).
+  const url = 'https://blast.ncbi.nlm.nih.gov/Blast.cgi?CMD=Put&PROGRAM=blastn&MEGABLAST=on&DATABASE=core_nt&QUERY=' + encodeURIComponent(fasta);
+  // window.open can be blocked (iframes/pop-up blockers); show a fallback link either way
+  let opened = null;
+  try { opened = window.open(url, '_blank'); } catch (e) { opened = null; }
+  $('mtext').textContent = fasta + (copied ? '✔ Sequence copied to clipboard.\n' : '⚠ Copy failed — select the sequence above and copy manually.\n') +
+    (opened ? '✔ BLAST opened in a new tab.\n' : '⚠ Pop-up blocked — open this link manually:\n' + url + '\n');
+  $('mblast').textContent = opened ? 'BLAST' : 'BLAST link below';
+  setTimeout(() => $('mblast').textContent = 'BLAST', 2500);
+}
+$('mblast').onclick = blastCurrent;
+
+$('mcopy').onclick = async () => {
+  const t = $('mtext').textContent;
+  const ok = await copyText(t);
+  $('mcopy').textContent = ok ? 'Copied!' : 'Copy failed';
+  setTimeout(() => $('mcopy').textContent = 'Copy', 1200);
+};
+
+async function loadEcoli() {
+  const ls = $('loadstatus'); ls.textContent = 'Downloading E. coli genome from NCBI…';
+  try {
+    const r = await fetch(ECOLI_URL);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const t = await r.text();
+    if (t[0] !== '>') throw new Error('unexpected response');
+    fullFasta = t;                 // full genome kept for searching
+    setPreview(t, 500);            // textarea shows only the first 500 nt
+    ls.textContent = 'Loaded (' + Math.round(t.length / 1000) + ' kb).';
+  } catch (e) {
+    ls.textContent = 'Could not download genome (' + e.message + '). Paste or open a FASTA file instead.';
+    if (!$('fasta').value) { fullFasta = '>demo\nATGAAACGCATTAGCACCACCATTACCACCACCATCACCATTACCACAGGTAACGGTGCGGGCTGAGAATTCGGATCC\n'; setPreview(fullFasta, 500); }
+  }
+  search();
+}
+
+$('go').onclick = search;
+$('reload').onclick = loadEcoli;
+$('icase').onchange = search;
+$('both').onchange = search;
+$('showIdx').addEventListener('input', renderTable);
+$('showIdx').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); renderTable(); const v = parseInt($('showIdx').value, 10); if (!isNaN(v) && v >= 1 && v <= mStart.length) showMatch(v - 1); } });
+let timer; $('pattern').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(search, 600); });
+$('pattern').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); search(); } });
+$('fasta').addEventListener('change', () => { fullFasta = $('fasta').value; search(); });
+$('file').addEventListener('change', e => {
+  const f = e.target.files[0]; if (!f) return;
+  const r = new FileReader(); r.onload = () => { fullFasta = String(r.result); setPreview(fullFasta, 500); search(); }; r.readAsText(f);
+});
+loadEcoli();
+</script>
+</body>
+</html>
